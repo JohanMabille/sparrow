@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <span>
+
 #include "sparrow/array_api.hpp"
 #include "sparrow/layout/array_bitmap_base.hpp"
 #include "sparrow/layout/array_factory.hpp"
@@ -84,18 +86,19 @@ namespace sparrow
      * map_array arr(std::move(keys), std::move(values), std::move(offsets));
      * ```
      */
-    class map_array final : public array_bitmap_base<map_array>
+    class map_array final : public mutable_array_bitmap_base<map_array>
     {
     public:
 
         using self_type = map_array;
-        using base_type = array_bitmap_base<self_type>;
+        using base_type = mutable_array_bitmap_base<self_type>;
         using inner_types = array_inner_types<self_type>;
         using value_iterator = inner_types::value_iterator;
         using const_value_iterator = inner_types::const_value_iterator;
         using size_type = typename base_type::size_type;
         using offset_type = const std::int32_t;
         using offset_buffer_type = u8_buffer<std::remove_const_t<offset_type>>;
+        using offset_span_type = std::span<const std::int32_t>;
 
         using bitmap_type = typename base_type::bitmap_type;
         using bitmap_const_reference = typename base_type::bitmap_const_reference;
@@ -109,6 +112,12 @@ namespace sparrow
         using value_type = nullable<inner_value_type>;
         using const_reference = nullable<inner_const_reference, bitmap_const_reference>;
         using iterator_tag = typename base_type::iterator_tag;
+        using iterator = typename base_type::iterator;
+        using const_iterator = typename base_type::const_iterator;
+
+        using base_type::insert;
+        using base_type::push_back;
+        using base_type::resize;
 
         /**
          * @brief Constructs map array from Arrow proxy.
@@ -268,6 +277,16 @@ namespace sparrow
          */
         [[nodiscard]] SPARROW_API const_value_iterator value_cend() const;
 
+        SPARROW_API void resize_values(size_type new_length, const map_value& value);
+
+        template <std::input_iterator InputIt>
+            requires std::convertible_to<typename std::iterator_traits<InputIt>::value_type, map_value>
+        constexpr value_iterator insert_values(const_value_iterator pos, InputIt first, InputIt last);
+
+        SPARROW_API value_iterator insert_value(const_value_iterator pos, const map_value& value, size_type count);
+
+        SPARROW_API value_iterator erase_values(const_value_iterator pos, size_type count);
+
         /**
          * @brief Gets mutable reference to map at specified index.
          *
@@ -298,7 +317,7 @@ namespace sparrow
          * @post Returns non-null pointer to offset data
          * @post Pointer is adjusted for any array offset
          */
-        [[nodiscard]] SPARROW_API offset_type* make_list_offsets() const;
+        [[nodiscard]] SPARROW_API offset_span_type make_list_offsets() const;
 
         /**
          * @brief Creates the entries array (struct with key/value fields).
@@ -336,6 +355,12 @@ namespace sparrow
          */
         [[nodiscard]] SPARROW_API static bool
         check_keys_sorted(const array& flat_keys, const offset_buffer_type& offsets);
+
+        SPARROW_API void replace_contents(
+            std::vector<array_traits::value_type>&& flat_keys,
+            std::vector<array_traits::value_type>&& flat_items,
+            offset_buffer_type&& list_offsets
+        );
 
         /**
          * @brief Core implementation for creating Arrow proxy structures.
@@ -530,13 +555,13 @@ namespace sparrow
         }
 
         static constexpr std::size_t OFFSET_BUFFER_INDEX = 1;
-        offset_type* p_list_offsets;
-
         cloning_ptr<array_wrapper> p_entries_array;
-        bool m_keys_sorted;
+        bool m_keys_sorted{};
 
         // friend classes
         friend class array_crtp_base<map_array>;
+        friend class mutable_array_base<map_array>;
+        friend class detail::layout_value_functor<map_array, map_value>;
         friend class detail::layout_value_functor<const map_array, map_value>;
     };
 
@@ -546,6 +571,24 @@ namespace sparrow
         return detail::offset_buffer_from_sizes<std::remove_const_t<offset_type>>(
             std::forward<SIZES_RANGE>(sizes)
         );
+    }
+
+    template <std::input_iterator InputIt>
+        requires std::convertible_to<typename std::iterator_traits<InputIt>::value_type, map_value>
+    constexpr auto map_array::insert_values(const_value_iterator pos, InputIt first, InputIt last)
+        -> value_iterator
+    {
+        const auto index = static_cast<size_type>(std::distance(value_cbegin(), pos));
+        size_type count = 0;
+        for (auto it = first; it != last; ++it, ++count)
+        {
+            insert_value(
+                std::next(value_cbegin(), static_cast<std::ptrdiff_t>(index + count)),
+                *it,
+                1
+            );
+        }
+        return std::next(value_begin(), static_cast<std::ptrdiff_t>(index));
     }
 
     template <input_metadata_container METADATA_RANGE>
